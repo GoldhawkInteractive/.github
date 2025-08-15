@@ -1,0 +1,282 @@
+# .github/workflows/trello-move-attach-assign.yml  (in ORG .github repo)
+name: Trello: Move Attach Assign
+
+on:
+  workflow_call:
+    secrets:
+      TRELLO_KEY: { required: true }
+      TRELLO_TOKEN: { required: true }
+      TRELLO_BOARD_ID: { required: true }
+      TRELLO_MEMBER_MAP: { required: false }
+
+permissions:
+  contents: read
+
+jobs:
+  trello-update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Create script
+        run: |
+          cat > trello-update.js <<'EOF'
+          const fs = require('fs');
+
+          const {
+            TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID, TRELLO_MEMBER_MAP,
+            GITHUB_EVENT_PATH
+          } = process.env;
+
+          if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_BOARD_ID) {
+            console.error('Missing required secrets: TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID');
+            process.exit(1);
+          }
+
+          const event = JSON.parse(fs.readFileSync(GITHUB_EVENT_PATH, 'utf8'));
+          const commits = event.commits || [];
+          const repoHtml = event.repository?.html_url || '';
+
+          // Matches: {#close <card_id> <list_name>} OR {#close <list_name>}
+          const CLOSE_ANY_RE = /\{#close\s+([^}]+)\}/gi;
+          // Matches: {#attach <card_id>}
+          const ATTACH_ID_RE = /\{#attach\s+(\d+)\}/gi;
+
+          // Work items
+          // byId: idShort -> { targetListName?:string, commits:[{url,title,author}] }
+          const byId = new Map();
+          // toCreate: array of { listName, url, title, author, message }
+          const toCreate = [];
+
+          const memberMap = (() => { try { return TRELLO_MEMBER_MAP ? JSON.parse(TRELLO_MEMBER_MAP) : {}; } catch { return {}; } })();
+
+          function commitUrl(sha){ return repoHtml ? `${repoHtml}/commit/${sha}` : ''; }
+          function mkTitle(c){ return `Commit ${c.id.slice(0,7)}: ${c.message.split('\n')[0]}`; }
+          function authorOf(c){
+            return { name: c.author?.name || '', email: c.author?.email || '', gh: event.sender?.login || '' };
+          }
+
+          for (const c of commits) {
+            const msg = c.message;
+
+            // {#attach <card_id>}
+            let m;
+            while ((m = ATTACH_ID_RE.exec(msg)) !== null) {
+              const idShort = String(m[1]);
+              if (!byId.has(idShort)) byId.set(idShort, { commits: [] });
+              byId.get(idShort).commits.push({ url: commitUrl(c.id) || c.url, title: mkTitle(c), author: authorOf(c) });
+            }
+
+            // {#close ...}
+            while ((m = CLOSE_ANY_RE.exec(msg)) !== null) {
+              const inner = m[1].trim();              // everything between {#close …}
+              const parts = inner.match(/^(\d+)\s+(.+)$/); // "<id> <list>"
+              if (parts) {
+                const idShort = parts[1];
+                const listName = parts[2].trim().replace(/^["']|["']$/g,''); // allow quotes
+                if (!byId.has(idShort)) byId.set(idShort, { commits: [], targetListName: listName });
+                const bucket = byId.get(idShort);
+                // keep first specified list for that card if multiple appear
+                if (!bucket.targetListName) bucket.targetListName = listName;
+                bucket.commits.push({ url: commitUrl(c.id) || c.url, title: mkTitle(c), author: authorOf(c) });
+              } else {
+                // No numeric ID: treat as create-on-close -> "<list>"
+                const listName = inner.trim().replace(/^["']|["']$/g,'');
+                toCreate.push({
+                  listName,
+                  url: commitUrl(c.id) || c.url,
+                  title: mkTitle(c),
+                  author: authorOf(c),
+                  message: c.message
+                });
+              }
+            }
+          }
+
+          if (byId.size === 0 && toCreate.length === 0) {
+            console.log('No Trello tags found.');
+            process.exit(0);
+          }
+
+          const base = 'https://api.trello.com/1';
+          const auth = `key=${encodeURIComponent(TRELLO_KEY)}&token=${encodeURIComponent(TRELLO_TOKEN)}`;
+
+          async function fetchJson(url, opts = {}) {
+            const res = await fetch(url, opts);
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+            return res.json();
+          }
+
+          async function getBoardMembers() {
+            return fetchJson(`${base}/boards/${encodeURIComponent(TRELLO_BOARD_ID)}/members?fields=fullName,username,initials&${auth}`);
+          }
+
+          async function getBoardLists() {
+            return fetchJson(`${base}/boards/${encodeURIComponent(TRELLO_BOARD_ID)}/lists?fields=name&${auth}`);
+          }
+
+          async function findCardByShortId(idShort) {
+            const url = `${base}/boards/${encodeURIComponent(TRELLO_BOARD_ID)}/cards/${encodeURIComponent(idShort)}?${auth}`;
+            try { return await fetchJson(url); }
+            catch (e) {
+              const data = await fetchJson(`${base}/search?query=${encodeURIComponent(idShort)}&idBoards=${encodeURIComponent(TRELLO_BOARD_ID)}&modelTypes=cards&cards_limit=10&${auth}`);
+              const card = (data.cards || []).find(c => String(c.idShort) === String(idShort));
+              if (!card) throw e;
+              return card;
+            }
+          }
+
+          async function moveCard(cardId, listId) {
+            const res = await fetch(`${base}/cards/${encodeURIComponent(cardId)}?idList=${encodeURIComponent(listId)}&${auth}`, { method: 'PUT' });
+            if (!res.ok) throw new Error(`Move failed: ${res.status} ${res.statusText} ${await res.text()}`);
+          }
+
+          async function attachToCard(cardId, urlToAttach, name) {
+            const form = new URLSearchParams(); form.set('url', urlToAttach); if (name) form.set('name', name);
+            const res = await fetch(`${base}/cards/${encodeURIComponent(cardId)}/attachments?${auth}`, { method: 'POST', body: form });
+            if (!res.ok) throw new Error(`Attach failed: ${res.status} ${res.statusText} ${await res.text()}`);
+          }
+
+          async function addMemberToCard(cardId, trelloMemberId) {
+            const form = new URLSearchParams(); form.set('value', trelloMemberId);
+            const res = await fetch(`${base}/cards/${encodeURIComponent(cardId)}/idMembers?${auth}`, { method: 'POST', body: form });
+            if (!res.ok && res.status !== 400) throw new Error(`Assign failed: ${res.status} ${res.statusText} ${await res.text()}`);
+          }
+
+          async function createCard({ name, desc, idList, idMembers }) {
+            const form = new URLSearchParams();
+            form.set('name', name);
+            form.set('desc', desc || '');
+            form.set('idList', idList);
+            if (idMembers && idMembers.length) form.set('idMembers', idMembers.join(','));
+            const res = await fetch(`${base}/cards?${auth}`, { method: 'POST', body: form });
+            if (!res.ok) throw new Error(`Create failed: ${res.status} ${res.statusText} ${await res.text()}`);
+            return res.json();
+          }
+
+          function normalize(s){ return (s||'').toLowerCase().trim().replace(/\s+/g,' '); }
+          
+          function scoreList(target, candidate){
+            const t = normalize(target), c = normalize(candidate);
+            if (t === c) return 1000;           // exact (case-insensitive)
+            if (c.startsWith(t)) return 500;    // prefix
+            if (c.includes(t)) return 300;      // substring
+            // crude similarity: overlap of unique tokens
+            const ts = new Set(t.split(' ')), cs = new Set(c.split(' '));
+            let overlap = 0; ts.forEach(w => { if (cs.has(w)) overlap++; });
+            return overlap; // 0..n
+          }
+
+          function resolveListIdByName(lists, name){
+            if (!name) return null;
+            let best = null, bestScore = -1;
+            for (const L of lists) {
+              const s = scoreList(name, L.name);
+              if (s > bestScore || (s === bestScore && L.name.length < (best?.name.length || Infinity))) {
+                best = L; bestScore = s;
+              }
+            }
+            return (bestScore > 0) ? best.id : null;
+          }
+
+          function buildResolver(boardMembers){
+            const byUsername = new Map(boardMembers.map(m => [normalize(m.username), m]));
+            const byId = new Map(boardMembers.map(m => [m.id, m]));
+            const byFullName = new Map(boardMembers.map(m => [normalize(m.fullName), m]));
+            const resolved = {};
+            for (const [k,v] of Object.entries(memberMap)) {
+              const vv=String(v);
+              if (byId.has(vv)) { resolved[k.toLowerCase()] = vv; continue; }
+              const m = byUsername.get(normalize(vv)); if (m) resolved[k.toLowerCase()] = m.id;
+            }
+            return function resolve(author){
+              const keys = [author.gh, author.email].filter(Boolean).map(k=>k.toLowerCase());
+              for (const k of keys) if (resolved[k]) return resolved[k];
+              const name = normalize(author.name);
+              if (name) {
+                if (byFullName.has(name)) return byFullName.get(name).id;
+                if (byUsername.has(name)) return byUsername.get(name).id;
+              }
+              const local = normalize((author.email||'').split('@')[0]);
+              if (local && byUsername.has(local)) return byUsername.get(local).id;
+              return null;
+            };
+          }
+
+          (async () => {
+            let acted = 0;
+            const [members, lists] = await Promise.all([getBoardMembers(), getBoardLists()]);
+            const resolveMember = buildResolver(members);
+
+            // Handle existing cards with move target
+            for (const [idShort, bucket] of byId.entries()) {
+              try {
+                const card = await findCardByShortId(idShort);
+
+                // Move if a list name was provided
+                if (bucket.targetListName) {
+                  const listId = resolveListIdByName(lists, bucket.targetListName);
+                  if (!listId) console.error(`No matching list for "${bucket.targetListName}"`);
+                  else {
+                    try { await moveCard(card.id, listId); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${bucket.targetListName}`); }
+                    catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
+                  }
+                }
+
+                // Attach commits (dedupe per push)
+                const seen = new Set();
+                for (const { url, title } of bucket.commits) {
+                  if (seen.has(url)) continue; seen.add(url);
+                  try { await attachToCard(card.id, url, title); console.log(`  ↳ Attached ${url}`); }
+                  catch (e) { console.error(`  ↳ Attach failed: ${e.message}`); }
+                }
+
+                // Assign authors
+                const existing = new Set(card.idMembers || []);
+                for (const { author } of bucket.commits) {
+                  const id = resolveMember(author);
+                  if (id && !existing.has(id)) {
+                    try { await addMemberToCard(card.id, id); existing.add(id); console.log(`  ↳ Assigned ${id}`); }
+                    catch (e) { console.error(`  ↳ Assign failed: ${e.message}`); }
+                  }
+                }
+
+                acted++;
+              } catch (err) {
+                console.error(`Card #${idShort} error: ${err.message}`);
+              }
+            }
+
+            // Create new cards for {#close <list_name>}
+            for (const item of toCreate) {
+              const listId = resolveListIdByName(lists, item.listName);
+              if (!listId) { console.error(`No matching list for "${item.listName}"`); continue; }
+              const authorId = resolveMember(item.author);
+              const name = item.title;
+              const desc = `Created via {#close ${item.listName}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;
+              try {
+                const card = await createCard({
+                  name, desc, idList: listId, idMembers: authorId ? [authorId] : []
+                });
+                try { await attachToCard(card.id, item.url, item.title); console.log(`Created "${card.name}" in ${item.listName} and attached ${item.url}`); }
+                catch (e) { console.error(`Attach after create failed: ${e.message}`); }
+                acted++;
+              } catch (e) {
+                console.error(`Create card failed: ${e.message}`);
+              }
+            }
+
+            if (acted === 0) process.exitCode = 2;
+          })();
+          EOF
+
+      - name: Run script
+        env:
+          TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
+          TRELLO_MEMBER_MAP: ${{ secrets.TRELLO_MEMBER_MAP }}
+        run: node trello-update.js
