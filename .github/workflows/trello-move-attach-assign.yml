@@ -1,5 +1,5 @@
 # .github/workflows/trello-move-attach-assign.yml  (in ORG .github repo)
-name: Trello: Move Attach Assign
+name: "Trello: Move Attach Assign"
 
 on:
   workflow_call:
