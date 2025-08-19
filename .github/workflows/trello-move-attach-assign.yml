@@ -40,8 +40,8 @@ jobs:
           const commits = event.commits || [];
           const repoHtml = event.repository?.html_url || '';
 
-          // Matches: {#close <card_id> <list_name>} OR {#close <list_name>}
-          const CLOSE_ANY_RE = /\{#close\s+([^}]+)\}/gi;
+          // Matches: {#close <card_id> <list_name>}, {#close <card_id>}, {#close <list_name>}, or {#close}
+          const CLOSE_ANY_RE = /\{#close(?:\s+([^}]+))?\}/gi;
           // Matches: {#attach <card_id>}
           const ATTACH_ID_RE = /\{#attach\s+(\d+)\}/gi;
 
@@ -72,19 +72,19 @@ jobs:
 
             // {#close ...}
             while ((m = CLOSE_ANY_RE.exec(msg)) !== null) {
-              const inner = m[1].trim();              // everything between {#close …}
-              const parts = inner.match(/^(\d+)\s+(.+)$/); // "<id> <list>"
+              const inner = (m[1] || '').trim();              // everything between {#close …}
+              const parts = inner.match(/^(\d+)(?:\s+(.+))?$/); // "<id> <list>?"
               if (parts) {
                 const idShort = parts[1];
-                const listName = parts[2].trim().replace(/^["']|["']$/g,''); // allow quotes
+                const listName = (parts[2] || '').trim().replace(/^["']|["']$/g,'') || null; // allow quotes
                 if (!byId.has(idShort)) byId.set(idShort, { commits: [], targetListName: listName });
                 const bucket = byId.get(idShort);
                 // keep first specified list for that card if multiple appear
                 if (!bucket.targetListName) bucket.targetListName = listName;
                 bucket.commits.push({ url: commitUrl(c.id) || c.url, title: mkTitle(c), author: authorOf(c) });
               } else {
-                // No numeric ID: treat as create-on-close -> "<list>"
-                const listName = inner.trim().replace(/^["']|["']$/g,'');
+                // No numeric ID: treat as create-on-close
+                const listName = inner ? inner.trim().replace(/^["']|["']$/g,'') : null;
                 const firstLine = c.message.split('\n')[0];
                 const cardTitle = firstLine.replace(/\s*\{#.*?\}\s*/g, '').trim();
                 toCreate.push({
@@ -189,6 +189,10 @@ jobs:
             return (bestScore > 0) ? best.id : null;
           }
 
+          function findDefaultList(lists){
+            return lists.find(L => L.name.toLowerCase().includes('{complete}')) || null;
+          }
+
           function buildResolver(boardMembers){
             const byUsername = new Map(boardMembers.map(m => [normalize(m.username), m]));
             const byId = new Map(boardMembers.map(m => [m.id, m]));
@@ -223,14 +227,14 @@ jobs:
               try {
                 const card = await findCardByShortId(idShort);
 
-                // Move if a list name was provided
-                if (bucket.targetListName) {
-                  const listId = resolveListIdByName(lists, bucket.targetListName);
-                  if (!listId) console.error(`No matching list for "${bucket.targetListName}"`);
-                  else {
-                    try { await moveCard(card.id, listId); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${bucket.targetListName}`); }
-                    catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
-                  }
+                const target = bucket.targetListName
+                  ? (() => { const id = resolveListIdByName(lists, bucket.targetListName); return id ? { id, name: bucket.targetListName } : null; })()
+                  : findDefaultList(lists);
+                if (!target) {
+                  console.error(`No matching list for "${bucket.targetListName || '{complete}'}"`);
+                } else {
+                  try { await moveCard(card.id, target.id); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${target.name}`); }
+                  catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
                 }
 
                 // Attach commits (dedupe per push)
@@ -257,18 +261,20 @@ jobs:
               }
             }
 
-            // Create new cards for {#close <list_name>}
+            // Create new cards for {#close <list_name>} or default list
             for (const item of toCreate) {
-              const listId = resolveListIdByName(lists, item.listName);
-              if (!listId) { console.error(`No matching list for "${item.listName}"`); continue; }
+              const target = item.listName
+                ? (() => { const id = resolveListIdByName(lists, item.listName); return id ? { id, name: item.listName } : null; })()
+                : findDefaultList(lists);
+              if (!target) { console.error(`No matching list for "${item.listName || '{complete}'}"`); continue; }
               const authorId = resolveMember(item.author);
               const name = item.cardTitle;
-              const desc = `Created via {#close ${item.listName}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;
+              const desc = `Created via {#close ${item.listName || target.name}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;
               try {
                 const card = await createCard({
-                  name, desc, idList: listId, idMembers: authorId ? [authorId] : []
+                  name, desc, idList: target.id, idMembers: authorId ? [authorId] : []
                 });
-                try { await attachToCard(card.id, item.url, item.attachTitle); console.log(`Created "${card.name}" in ${item.listName} and attached ${item.url}`); }
+                try { await attachToCard(card.id, item.url, item.attachTitle); console.log(`Created "${card.name}" in ${target.name} and attached ${item.url}`); }
                 catch (e) { console.error(`Attach after create failed: ${e.message}`); }
                 acted++;
               } catch (e) {
