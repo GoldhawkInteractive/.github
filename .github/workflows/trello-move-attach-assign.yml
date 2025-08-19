@@ -157,6 +157,7 @@ jobs:
             form.set('name', name);
             form.set('desc', desc || '');
             form.set('idList', idList);
+            form.set('pos', 'top');
             if (idMembers && idMembers.length) form.set('idMembers', idMembers.join(','));
             const res = await fetch(`${base}/cards?${auth}`, { method: 'POST', body: form });
             if (!res.ok) throw new Error(`Create failed: ${res.status} ${res.statusText} ${await res.text()}`);
