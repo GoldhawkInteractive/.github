@@ -48,7 +48,7 @@ jobs:
           // Work items
           // byId: idShort -> { targetListName?:string, commits:[{url,title,author}] }
           const byId = new Map();
-          // toCreate: array of { listName, url, title, author, message }
+          // toCreate: array of { listName, url, cardTitle, attachTitle, author, message }
           const toCreate = [];
 
           const memberMap = (() => { try { return TRELLO_MEMBER_MAP ? JSON.parse(TRELLO_MEMBER_MAP) : {}; } catch { return {}; } })();
@@ -85,10 +85,13 @@ jobs:
               } else {
                 // No numeric ID: treat as create-on-close -> "<list>"
                 const listName = inner.trim().replace(/^["']|["']$/g,'');
+                const firstLine = c.message.split('\n')[0];
+                const cardTitle = firstLine.replace(/\s*\{#.*?\}\s*/g, '').trim();
                 toCreate.push({
                   listName,
                   url: commitUrl(c.id) || c.url,
-                  title: mkTitle(c),
+                  cardTitle,
+                  attachTitle: mkTitle(c),
                   author: authorOf(c),
                   message: c.message
                 });
@@ -130,7 +133,10 @@ jobs:
           }
 
           async function moveCard(cardId, listId) {
-            const res = await fetch(`${base}/cards/${encodeURIComponent(cardId)}?idList=${encodeURIComponent(listId)}&${auth}`, { method: 'PUT' });
+            const res = await fetch(
+              `${base}/cards/${encodeURIComponent(cardId)}?idList=${encodeURIComponent(listId)}&pos=top&${auth}`,
+              { method: 'PUT' }
+            );
             if (!res.ok) throw new Error(`Move failed: ${res.status} ${res.statusText} ${await res.text()}`);
           }
 
@@ -255,13 +261,13 @@ jobs:
               const listId = resolveListIdByName(lists, item.listName);
               if (!listId) { console.error(`No matching list for "${item.listName}"`); continue; }
               const authorId = resolveMember(item.author);
-              const name = item.title;
+              const name = item.cardTitle;
               const desc = `Created via {#close ${item.listName}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;
               try {
                 const card = await createCard({
                   name, desc, idList: listId, idMembers: authorId ? [authorId] : []
                 });
-                try { await attachToCard(card.id, item.url, item.title); console.log(`Created "${card.name}" in ${item.listName} and attached ${item.url}`); }
+                try { await attachToCard(card.id, item.url, item.attachTitle); console.log(`Created "${card.name}" in ${item.listName} and attached ${item.url}`); }
                 catch (e) { console.error(`Attach after create failed: ${e.message}`); }
                 acted++;
               } catch (e) {
