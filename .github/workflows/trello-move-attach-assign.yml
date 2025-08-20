@@ -222,19 +222,22 @@ jobs:
             const [members, lists] = await Promise.all([getBoardMembers(), getBoardLists()]);
             const resolveMember = buildResolver(members);
 
-            // Handle existing cards with move target
+            // Handle existing cards; move only when {#close} requested
             for (const [idShort, bucket] of byId.entries()) {
               try {
                 const card = await findCardByShortId(idShort);
 
-                const target = bucket.targetListName
-                  ? (() => { const id = resolveListIdByName(lists, bucket.targetListName); return id ? { id, name: bucket.targetListName } : null; })()
-                  : findDefaultList(lists);
-                if (!target) {
-                  console.error(`No matching list for "${bucket.targetListName || '{complete}'}"`);
-                } else {
+                const target = (bucket.targetListName !== undefined)
+                  ? (bucket.targetListName
+                      ? (() => { const id = resolveListIdByName(lists, bucket.targetListName); return id ? { id, name: bucket.targetListName } : null; })()
+                      : findDefaultList(lists))
+                  : null;
+
+                if (target) {
                   try { await moveCard(card.id, target.id); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${target.name}`); }
                   catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
+                } else if (bucket.targetListName !== undefined) {
+                  console.error(`No matching list for "${bucket.targetListName || '{complete}'}"`);
                 }
 
                 // Attach commits (dedupe per push)
