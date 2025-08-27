@@ -37,12 +37,16 @@ jobs:
           }
 
           const event = JSON.parse(fs.readFileSync(GITHUB_EVENT_PATH, 'utf8'));
-          const ref = event.ref || '';
-          const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : ref;
-          const isMerge = Array.isArray(event.head_commit?.parents) && event.head_commit.parents.length > 1;
-          const commits = (isMerge && (branch === 'development' || branch === 'master'))
-            ? [event.head_commit]
-            : (event.commits || []);
+          const allCommits = event.commits || [];
+          let commits = allCommits.filter(c => c.distinct);
+          // If a merge commit exists in this push, process only the merge commit(s)
+          // to avoid acting on the individual commits being merged.
+          const mergeCommits = commits.filter(c => Array.isArray(c.parents) && c.parents.length > 1);
+          if (mergeCommits.length > 0) commits = mergeCommits;
+          if (commits.length === 0) {
+            console.log('No new commits to process (merge constituents or non-distinct commits are ignored).');
+            process.exit(0);
+          }
           const repoHtml = event.repository?.html_url || '';
 
           // Matches: {#close <card_id> <list_name>}, {#close <card_id>}, {#close <list_name>}, or {#close}
