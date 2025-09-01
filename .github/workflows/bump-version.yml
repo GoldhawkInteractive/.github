@@ -1,0 +1,98 @@
+name: Bump Version
+
+on:
+  workflow_call:
+    inputs:
+      trello-card-id:
+        required: true
+        type: string
+      release-type:
+        required: false
+        type: string
+        default: patch
+      version:
+        required: false
+        type: string
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Bump version
+        id: bump
+        env:
+          RELEASE_TYPE: ${{ inputs.release-type }}
+          SPECIFIED_VERSION: ${{ inputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const releaseType = process.env.RELEASE_TYPE || 'patch';
+          const specified = process.env.SPECIFIED_VERSION;
+          const pkgPath = 'package.json';
+          const verPath = 'versioning.json';
+
+          const readJSON = p => JSON.parse(fs.readFileSync(p, 'utf8'));
+          const writeJSON = (p, obj) => fs.writeFileSync(p, JSON.stringify(obj, null, 4) + '\n');
+
+          const getCurrentVersion = () => {
+            if (fs.existsSync(verPath)) {
+              return readJSON(verPath).VERSION;
+            }
+            if (fs.existsSync(pkgPath)) {
+              return readJSON(pkgPath).version;
+            }
+            throw new Error('No version found');
+          };
+
+          const inc = (version, type) => {
+            const parts = version.split('.').map(Number);
+            if (type === 'major') return `${parts[0]+1}.0.0`;
+            if (type === 'minor') return `${parts[0]}.${parts[1]+1}.0`;
+            return `${parts[0]}.${parts[1]}.${parts[2]+1}`;
+          };
+
+          const current = getCurrentVersion();
+          const newVersion = specified || inc(current, releaseType);
+
+          if (fs.existsSync(verPath)) {
+            const data = readJSON(verPath);
+            data.VERSION = newVersion;
+            writeJSON(verPath, data);
+          }
+
+          if (fs.existsSync(pkgPath)) {
+            const pkg = readJSON(pkgPath);
+            pkg.version = newVersion;
+            if (pkg.dependencies) {
+              Object.keys(pkg.dependencies).forEach(dep => {
+                pkg.dependencies[dep] = newVersion;
+              });
+            }
+            writeJSON(pkgPath, pkg);
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${newVersion}\n`);
+          NODE
+      - name: Configure Git
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+      - name: Commit changes
+        run: |
+          git add -A
+          git commit -m "version: bump {#close ${TRELLO_CARD_ID} ${VERSION}}" || echo "No changes to commit"
+        env:
+          TRELLO_CARD_ID: ${{ inputs.trello-card-id }}
+          VERSION: ${{ steps.bump.outputs.version }}
+      - name: Push changes
+        if: success()
+        run: git push
