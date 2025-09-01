@@ -1,0 +1,72 @@
+name: Manual Release
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "Release name and tag"
+        required: true
+        type: string
+      commit:
+        description: "Commit SHA to release"
+        required: true
+        type: string
+      trelloCardId:
+        description: "Trello card ID"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout target commit
+        run: |
+          git fetch origin
+          git checkout ${{ inputs.commit }}
+
+      - name: Create release branch
+        env:
+          RELEASE_NAME: ${{ inputs.name }}
+        run: |
+          git checkout -b "release-${RELEASE_NAME}"
+          git push origin "release-${RELEASE_NAME}"
+
+      - name: Tag release
+        env:
+          RELEASE_NAME: ${{ inputs.name }}
+          TRELLO_CARD_ID: ${{ inputs.trelloCardId }}
+        run: |
+          git tag -a "v${RELEASE_NAME}" -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}"
+          git push origin "v${RELEASE_NAME}"
+
+      - name: Merge into development and master
+        env:
+          RELEASE_NAME: ${{ inputs.name }}
+        run: |
+          git checkout development
+          git merge --no-ff "release-${RELEASE_NAME}"
+          git push origin development
+
+          git checkout master
+          git merge --no-ff "release-${RELEASE_NAME}"
+          git push origin master
+
+      - name: Delete release branch
+        env:
+          RELEASE_NAME: ${{ inputs.name }}
+        run: |
+          git push origin --delete "release-${RELEASE_NAME}"
+          git branch -D "release-${RELEASE_NAME}"
