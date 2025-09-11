@@ -55,13 +55,14 @@ jobs:
       - name: Merge into development and master
         env:
           RELEASE_NAME: ${{ inputs.name }}
+          TRELLO_CARD_ID: ${{ inputs.trelloCardId }}
         run: |
           git checkout development
-          git merge --no-ff "release-${RELEASE_NAME}"
+          git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"
           git push origin development
 
           git checkout master
-          git merge --no-ff "release-${RELEASE_NAME}"
+          git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"
           git push origin master
 
       - name: Delete release branch
