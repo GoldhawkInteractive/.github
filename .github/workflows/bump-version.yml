@@ -3,16 +3,11 @@ name: Bump Version
 on:
   workflow_call:
     inputs:
-      trello-card-id:
+      release:
         required: true
+        description: "Expects: \"major\", \"minor\", \"patch\", or a version of the form X.Y.Z"
         type: string
-      release-type:
-        required: false
-        type: string
-        default: patch
-      version:
-        required: false
-        type: string
+        default: "minor"
 
 jobs:
   bump:
@@ -29,14 +24,22 @@ jobs:
       - name: Bump version
         id: bump
         env:
-          RELEASE_TYPE: ${{ inputs.release-type }}
-          SPECIFIED_VERSION: ${{ inputs.version }}
+          RELEASE_INPUT: ${{ inputs.release }}
         run: |
           node <<'NODE'
           const fs = require('fs');
 
-          const releaseType = process.env.RELEASE_TYPE || 'patch';
-          const specified = process.env.SPECIFIED_VERSION;
+          const releaseInputRaw = process.env.RELEASE_INPUT || 'minor';
+          const releaseInput = releaseInputRaw.trim();
+          const semverPattern = /^\d+\.\d+\.\d+$/;
+          const allowedTypes = new Set(['major', 'minor', 'patch']);
+          const normalizedInput = releaseInput.toLowerCase();
+          const releaseType = allowedTypes.has(normalizedInput) ? normalizedInput : null;
+          const specified = releaseType ? null : releaseInput;
+
+          if (!releaseType && (!specified || !semverPattern.test(specified))) {
+            throw new Error('Invalid release input. Expected "major", "minor", "patch", or a version of the form X.Y.Z.');
+          }
           const pkgPath = 'package.json';
           const verPath = 'versioning.json';
 
@@ -82,6 +85,90 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${newVersion}\n`);
           NODE
+      - name: Find Trello card
+        id: trello
+        env:
+          TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const { TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID, VERSION } = process.env;
+
+          if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_BOARD_ID) {
+            throw new Error('Missing Trello configuration (TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID).');
+          }
+
+          const cardName = `Create Release Branches (${VERSION})`;
+          const cardsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards/open`);
+          cardsUrl.searchParams.set('key', TRELLO_KEY);
+          cardsUrl.searchParams.set('token', TRELLO_TOKEN);
+          cardsUrl.searchParams.set('fields', 'id,name,idList');
+
+          const appendOutput = (card) => {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `card-id=${card.id}\n`);
+          };
+
+          const trelloFetch = async (input, init) => {
+            const response = await fetch(input, init);
+            if (!response.ok) {
+              const text = await response.text();
+              throw new Error(`Trello request failed: ${response.status} ${text}`);
+            }
+            return response;
+          };
+
+          (async () => {
+            const listsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/lists`);
+            listsUrl.searchParams.set('key', TRELLO_KEY);
+            listsUrl.searchParams.set('token', TRELLO_TOKEN);
+            listsUrl.searchParams.set('filter', 'open');
+
+            const listsResponse = await trelloFetch(listsUrl);
+            const lists = await listsResponse.json();
+            const completeListPrefix = `Complete (${VERSION})`;
+            const completeLists = lists.filter(list => list && !list.closed && typeof list.name === 'string' && list.name.startsWith(completeListPrefix));
+            const openLists = lists.filter(list => list && !list.closed);
+            const targetList = completeLists[0] || openLists[0];
+
+            if (!targetList) {
+              throw new Error(`Unable to locate an open list on board ${TRELLO_BOARD_ID} to create card "${cardName}".`);
+            }
+
+            const cardsResponse = await trelloFetch(cardsUrl);
+            const cards = await cardsResponse.json();
+            const validListIds = completeLists.length ? new Set(completeLists.map(list => list.id)) : new Set();
+            const match = cards.find(card => {
+              if (!card || card.name !== cardName) {
+                return false;
+              }
+              return validListIds.size === 0 || validListIds.has(card.idList);
+            });
+
+            if (match) {
+              appendOutput(match);
+              return;
+            }
+
+            const createUrl = new URL('https://api.trello.com/1/cards');
+            createUrl.searchParams.set('key', TRELLO_KEY);
+            createUrl.searchParams.set('token', TRELLO_TOKEN);
+            createUrl.searchParams.set('idList', targetList.id);
+            createUrl.searchParams.set('name', cardName);
+            createUrl.searchParams.set('pos', 'top');
+
+            const createResponse = await trelloFetch(createUrl, { method: 'POST' });
+            const createdCard = await createResponse.json();
+
+            appendOutput(createdCard);
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
       - name: Configure Git
         run: |
           git config user.name "${{ github.actor }}"
@@ -91,7 +178,7 @@ jobs:
           git add -A
           git commit -m "version: bump {#close ${TRELLO_CARD_ID} ${VERSION}}" || echo "No changes to commit"
         env:
-          TRELLO_CARD_ID: ${{ inputs.trello-card-id }}
+          TRELLO_CARD_ID: ${{ steps.trello.outputs.card-id }}
           VERSION: ${{ steps.bump.outputs.version }}
       - name: Push changes
         if: success()

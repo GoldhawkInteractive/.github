@@ -3,16 +3,8 @@ name: Manual Release
 on:
   workflow_call:
     inputs:
-      name:
-        description: "Release name and tag"
-        required: true
-        type: string
       commit:
         description: "Commit SHA to release"
-        required: true
-        type: string
-      trelloCardId:
-        description: "Trello card ID"
         required: true
         type: string
 
@@ -27,6 +19,32 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Determine release version
+        id: release
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const pkgPath = 'package.json';
+
+          if (!fs.existsSync(pkgPath)) {
+            throw new Error('package.json not found.');
+          }
+
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          const version = pkg && typeof pkg.version === 'string' ? pkg.version.trim() : '';
+
+          if (!version) {
+            throw new Error('package.json does not contain a valid version.');
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `name=${version}\n`);
+          NODE
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -39,23 +57,108 @@ jobs:
 
       - name: Create release branch
         env:
-          RELEASE_NAME: ${{ inputs.name }}
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
         run: |
           git checkout -b "release-${RELEASE_NAME}"
           git push origin "release-${RELEASE_NAME}"
 
+      - name: Find Trello card
+        id: trello
+        env:
+          TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
+          TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
+          VERSION: ${{ steps.release.outputs.name }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const { TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID, VERSION } = process.env;
+
+          if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_BOARD_ID) {
+            throw new Error('Missing Trello configuration (TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID).');
+          }
+
+          const cardName = `Create Release Branches (${VERSION})`;
+          const cardsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards/open`);
+          cardsUrl.searchParams.set('key', TRELLO_KEY);
+          cardsUrl.searchParams.set('token', TRELLO_TOKEN);
+          cardsUrl.searchParams.set('fields', 'id,name,idList');
+
+          const appendOutput = (card) => {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `card-id=${card.id}\n`);
+          };
+
+          const trelloFetch = async (input, init) => {
+            const response = await fetch(input, init);
+            if (!response.ok) {
+              const text = await response.text();
+              throw new Error(`Trello request failed: ${response.status} ${text}`);
+            }
+            return response;
+          };
+
+          (async () => {
+            const listsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/lists`);
+            listsUrl.searchParams.set('key', TRELLO_KEY);
+            listsUrl.searchParams.set('token', TRELLO_TOKEN);
+            listsUrl.searchParams.set('filter', 'open');
+
+            const listsResponse = await trelloFetch(listsUrl);
+            const lists = await listsResponse.json();
+            const completeListPrefix = `Complete (${VERSION})`;
+            const completeLists = lists.filter(list => list && !list.closed && typeof list.name === 'string' && list.name.startsWith(completeListPrefix));
+            const openLists = lists.filter(list => list && !list.closed);
+            const targetList = completeLists[0] || openLists[0];
+
+            if (!targetList) {
+              throw new Error(`Unable to locate an open list on board ${TRELLO_BOARD_ID} to create card "${cardName}".`);
+            }
+
+            const cardsResponse = await trelloFetch(cardsUrl);
+            const cards = await cardsResponse.json();
+            const validListIds = completeLists.length ? new Set(completeLists.map(list => list.id)) : new Set();
+            const match = cards.find(card => {
+              if (!card || card.name !== cardName) {
+                return false;
+              }
+              return validListIds.size === 0 || validListIds.has(card.idList);
+            });
+
+            if (match) {
+              appendOutput(match);
+              return;
+            }
+
+            const createUrl = new URL('https://api.trello.com/1/cards');
+            createUrl.searchParams.set('key', TRELLO_KEY);
+            createUrl.searchParams.set('token', TRELLO_TOKEN);
+            createUrl.searchParams.set('idList', targetList.id);
+            createUrl.searchParams.set('name', cardName);
+            createUrl.searchParams.set('pos', 'top');
+
+            const createResponse = await trelloFetch(createUrl, { method: 'POST' });
+            const createdCard = await createResponse.json();
+
+            appendOutput(createdCard);
+          })().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
       - name: Tag release
         env:
-          RELEASE_NAME: ${{ inputs.name }}
-          TRELLO_CARD_ID: ${{ inputs.trelloCardId }}
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
+          TRELLO_CARD_ID: ${{ steps.trello.outputs.card-id }}
         run: |
           git tag -a "v${RELEASE_NAME}" -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}"
           git push origin "v${RELEASE_NAME}"
 
       - name: Merge into development and master
         env:
-          RELEASE_NAME: ${{ inputs.name }}
-          TRELLO_CARD_ID: ${{ inputs.trelloCardId }}
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
+          TRELLO_CARD_ID: ${{ steps.trello.outputs.card-id }}
         run: |
           git checkout development
           git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"
@@ -67,7 +170,7 @@ jobs:
 
       - name: Delete release branch
         env:
-          RELEASE_NAME: ${{ inputs.name }}
+          RELEASE_NAME: ${{ steps.release.outputs.name }}
         run: |
           git push origin --delete "release-${RELEASE_NAME}"
           git branch -D "release-${RELEASE_NAME}"
