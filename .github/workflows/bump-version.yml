@@ -106,10 +106,13 @@ jobs:
           const cardsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards/open`);
           cardsUrl.searchParams.set('key', TRELLO_KEY);
           cardsUrl.searchParams.set('token', TRELLO_TOKEN);
-          cardsUrl.searchParams.set('fields', 'id,name,idList');
+          cardsUrl.searchParams.set('fields', 'id,name,idList,shortLink');
 
           const appendOutput = (card) => {
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `card-id=${card.id}\n`);
+            if (!card || !card.shortLink) {
+              throw new Error('Unable to determine Trello card shortLink.');
+            }
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `card-id=${card.shortLink}\n`);
           };
 
           const trelloFetch = async (input, init) => {
