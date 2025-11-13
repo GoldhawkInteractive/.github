@@ -79,7 +79,7 @@ jobs:
             throw new Error('Missing Trello configuration (TRELLO_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID).');
           }
 
-          const cardName = `Create Release Branches (${VERSION})`;
+          const cardName = `Merge Back Release Branches (${VERSION})`;
           const cardsUrl = new URL(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards/open`);
           cardsUrl.searchParams.set('key', TRELLO_KEY);
           cardsUrl.searchParams.set('token', TRELLO_TOKEN);
