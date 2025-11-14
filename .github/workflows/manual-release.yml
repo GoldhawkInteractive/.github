@@ -22,6 +22,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout target commit
+        run: |
+          git fetch origin
+          git checkout ${{ inputs.commit }}
 
       - name: Determine release version
         id: release
@@ -44,16 +54,6 @@ jobs:
 
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `name=${version}\n`);
           NODE
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Checkout target commit
-        run: |
-          git fetch origin
-          git checkout ${{ inputs.commit }}
 
       - name: Create release branch
         env:
