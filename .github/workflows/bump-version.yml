@@ -83,6 +83,13 @@ jobs:
             writeJSON(pkgPath, pkg);
           }
 
+          const settingsPath = 'ProjectSettings/ProjectSettings.asset';
+          if (fs.existsSync(settingsPath)) {
+            const settings = fs.readFileSync(settingsPath, 'utf8');
+            const updated = settings.replace(/^(\s*bundleVersion:\s*)\S+$/m, `$1${newVersion}`);
+            fs.writeFileSync(settingsPath, updated, 'utf8');
+          }
+
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${newVersion}\n`);
           NODE
       - name: Find Trello card
