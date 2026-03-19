@@ -170,6 +170,9 @@ jobs:
                 console.log(`Archived duplicate card "${dup.name}" (#${dup.idShort})`);
               }
               appendOutput(winner);
+            } else if (duplicates.length === 1) {
+              // Another runner already archived our card; use the surviving one
+              appendOutput(duplicates[0]);
             } else {
               appendOutput(createdCard);
             }
