@@ -195,12 +195,98 @@ jobs:
           RELEASE_NAME: ${{ steps.release.outputs.name }}
           TRELLO_CARD_ID: ${{ steps.trello.outputs.card-id }}
         run: |
-          git checkout development
-          git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"
+          cat > "${RUNNER_TEMP}/resolve-version-conflicts.js" <<'NODE'
+          const { execSync } = require('child_process');
+          const fs = require('fs');
+          const path = require('path');
+
+          const KNOWN = {
+            'versioning.json': { type: 'json', key: 'VERSION' },
+            'package.json': { type: 'json', key: 'version' },
+            'ProjectSettings/ProjectSettings.asset': { type: 'unity' },
+          };
+
+          const compareVersions = (a, b) => {
+            const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+            const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+            const len = Math.max(pa.length, pb.length);
+            for (let i = 0; i < len; i++) {
+              const av = pa[i] || 0;
+              const bv = pb[i] || 0;
+              if (av !== bv) return av - bv;
+            }
+            return 0;
+          };
+
+          const stageContent = (stage, file) =>
+            execSync(`git show :${stage}:${file}`, { encoding: 'utf8' });
+
+          const extractVersion = (content, info) => {
+            if (info.type === 'json') {
+              const value = JSON.parse(content)[info.key];
+              if (typeof value !== 'string') {
+                throw new Error(`${info.key} missing or not a string`);
+              }
+              return value.trim();
+            }
+            const m = content.match(/^\s*bundleVersion:\s*(\S+)\s*$/m);
+            if (!m) throw new Error('bundleVersion not found');
+            return m[1];
+          };
+
+          const conflicted = execSync('git diff --name-only --diff-filter=U', { encoding: 'utf8' })
+            .split('\n').map(s => s.trim()).filter(Boolean);
+
+          if (conflicted.length === 0) process.exit(0);
+
+          const unsupported = conflicted.filter(f => !KNOWN[f]);
+          if (unsupported.length > 0) {
+            console.error('Cannot auto-resolve conflicts in:\n  ' + unsupported.join('\n  '));
+            process.exit(1);
+          }
+
+          for (const file of conflicted) {
+            const info = KNOWN[file];
+            const ours = stageContent(2, file);
+            const theirs = stageContent(3, file);
+            const ourVer = extractVersion(ours, info);
+            const theirVer = extractVersion(theirs, info);
+            const useTheirs = compareVersions(theirVer, ourVer) > 0;
+            const side = useTheirs ? '--theirs' : '--ours';
+            const winnerVer = useTheirs ? theirVer : ourVer;
+            console.log(`${file}: ours=${ourVer} theirs=${theirVer} -> ${side} (${winnerVer})`);
+            execSync(`git checkout ${side} -- "${file}"`);
+            execSync(`git add -- "${file}"`);
+          }
+
+          const { RELEASE_NAME, TRELLO_CARD_ID, RUNNER_TEMP } = process.env;
+          const header = `Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}`;
+          const conflictsBlock = '# Conflicts:\n' + conflicted.map(f => `#    ${f}`).join('\n');
+          const message = `${header}\n\n${conflictsBlock}\n`;
+          const msgFile = path.join(RUNNER_TEMP, 'merge-commit-msg.txt');
+          fs.writeFileSync(msgFile, message);
+          execSync(`git commit --cleanup=verbatim -F "${msgFile}"`, { stdio: 'inherit' });
+          NODE
+
+          merge_back() {
+            local branch="$1"
+            git checkout "$branch"
+            if git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"; then
+              return 0
+            fi
+
+            echo "Merge into ${branch} hit conflicts; attempting auto-resolution for known version files..."
+            if ! node "${RUNNER_TEMP}/resolve-version-conflicts.js"; then
+              echo "::error::Conflicts in ${branch} cannot be auto-resolved."
+              git merge --abort
+              exit 1
+            fi
+          }
+
+          merge_back development
           git push origin development
 
-          git checkout master
-          git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"
+          merge_back master
           git push origin master
 
       - name: Delete release branch
