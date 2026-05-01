@@ -190,7 +190,7 @@ jobs:
           git tag -a "v${RELEASE_NAME}" -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}"
           git push origin "v${RELEASE_NAME}"
 
-      - name: Merge into development and master
+      - name: Merge release into downstream branches
         env:
           RELEASE_NAME: ${{ steps.release.outputs.name }}
           TRELLO_CARD_ID: ${{ steps.trello.outputs.card-id }}
@@ -268,26 +268,123 @@ jobs:
           execSync(`git commit --cleanup=verbatim -F "${msgFile}"`, { stdio: 'inherit' });
           NODE
 
-          merge_back() {
-            local branch="$1"
-            git checkout "$branch"
-            if git merge --no-ff -m "Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}" "release-${RELEASE_NAME}"; then
-              return 0
-            fi
+          node <<'NODE'
+          const { execFileSync, spawnSync } = require('child_process');
+          const fs = require('fs');
 
-            echo "Merge into ${branch} hit conflicts; attempting auto-resolution for known version files..."
-            if ! node "${RUNNER_TEMP}/resolve-version-conflicts.js"; then
-              echo "::error::Conflicts in ${branch} cannot be auto-resolved."
-              git merge --abort
-              exit 1
-            fi
+          const { RELEASE_NAME, TRELLO_CARD_ID, RUNNER_TEMP } = process.env;
+          const currentBranch = `release-${RELEASE_NAME}`;
+          const mergeMessage = `Finish v${RELEASE_NAME} {#close ${TRELLO_CARD_ID} ${RELEASE_NAME}}`;
+
+          const git = (...args) => spawnSync('git', args, { stdio: 'inherit' });
+          const gitOut = (...args) => execFileSync('git', args, { encoding: 'utf8' });
+
+          const parseSegments = name => {
+            const m = name.match(/^release-(\d+|[xy])\.(\d+|[xy])\.(\d+|[xy])$/);
+            return m ? [m[1], m[2], m[3]] : null;
+          };
+
+          const currentSegs = parseSegments(currentBranch);
+          if (!currentSegs || currentSegs.some(s => !/^\d+$/.test(s))) {
+            console.error(`Current release branch ${currentBranch} must have numeric segments.`);
+            process.exit(1);
+          }
+          const cur = currentSegs.map(Number);
+
+          const isMergeTarget = name => {
+            if (name === currentBranch) return false;
+            const segs = parseSegments(name);
+            if (!segs) return false;
+            for (let i = 0; i < 3; i++) {
+              const seg = segs[i];
+              if (seg === 'x' || seg === 'y') {
+                // wildcard at major or minor -> ancestor (merge); at patch with prior numeric matches -> immediate parent (skip)
+                return i < 2;
+              }
+              const n = Number(seg);
+              if (n > cur[i]) return true;
+              if (n < cur[i]) return false;
+            }
+            return false;
+          };
+
+          const sortKey = name =>
+            parseSegments(name).map(s => /^\d+$/.test(s) ? Number(s) : Number.MAX_SAFE_INTEGER);
+
+          const remoteBranches = gitOut('ls-remote', '--heads', 'origin', 'refs/heads/release-*')
+            .split('\n')
+            .map(line => {
+              const m = line.match(/refs\/heads\/(.+)$/);
+              return m ? m[1] : null;
+            })
+            .filter(Boolean);
+
+          const releaseTargets = remoteBranches.filter(isMergeTarget).sort((a, b) => {
+            const ka = sortKey(a);
+            const kb = sortKey(b);
+            for (let i = 0; i < 3; i++) {
+              if (ka[i] !== kb[i]) return ka[i] - kb[i];
+            }
+            return 0;
+          });
+
+          const targets = ['development', 'master', ...releaseTargets];
+          console.log(`Merge targets: ${targets.join(', ')}`);
+          if (releaseTargets.length === 0) {
+            console.log('No higher release branches to merge into.');
           }
 
-          merge_back development
-          git push origin development
+          const failures = [];
+          const successes = [];
 
-          merge_back master
-          git push origin master
+          for (const target of targets) {
+            console.log(`\n=== Merging ${currentBranch} into ${target} ===`);
+            try {
+              if (git('checkout', target).status !== 0) {
+                failures.push({ target, reason: 'checkout failed' });
+                continue;
+              }
+
+              const merge = git('merge', '--no-ff', '-m', mergeMessage, currentBranch);
+              if (merge.status !== 0) {
+                if (!fs.existsSync('.git/MERGE_HEAD')) {
+                  console.log(`Merge into ${target} failed without entering conflict state.`);
+                  failures.push({ target, reason: 'merge failed' });
+                  continue;
+                }
+                console.log(`Conflict in ${target}; attempting auto-resolution for known version files...`);
+                const resolve = spawnSync('node', [`${RUNNER_TEMP}/resolve-version-conflicts.js`], { stdio: 'inherit' });
+                if (resolve.status !== 0) {
+                  console.log(`Cannot auto-resolve conflicts in ${target}; aborting merge.`);
+                  git('merge', '--abort');
+                  failures.push({ target, reason: 'unresolvable conflict' });
+                  continue;
+                }
+              }
+
+              if (git('push', 'origin', target).status !== 0) {
+                failures.push({ target, reason: 'push failed' });
+                continue;
+              }
+
+              successes.push(target);
+            } catch (err) {
+              console.error(`Unexpected error processing ${target}: ${err && err.message}`);
+              if (fs.existsSync('.git/MERGE_HEAD')) git('merge', '--abort');
+              failures.push({ target, reason: 'unexpected error' });
+            }
+          }
+
+          console.log('\n=== Merge Summary ===');
+          console.log(`Succeeded (${successes.length}): ${successes.join(', ') || '(none)'}`);
+          if (failures.length > 0) {
+            const detail = failures.map(f => `${f.target} (${f.reason})`).join(', ');
+            console.log(`Failed (${failures.length}): ${detail}`);
+            const failedNames = failures.map(f => f.target).join(', ');
+            console.log(`::error::Failed to merge ${currentBranch} into: ${failedNames}. Release branch will be preserved for manual resolution.`);
+            process.exit(1);
+          }
+          NODE
 
       - name: Delete release branch
         env:
