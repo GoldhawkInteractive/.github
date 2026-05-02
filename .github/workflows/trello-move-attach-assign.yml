@@ -49,6 +49,14 @@ jobs:
           }
           const repoHtml = event.repository?.html_url || '';
 
+          const inferredVersion = (() => {
+            const m = (event.ref || '').match(/^refs\/heads\/release-(\d+\.\d+\.\d+)$/);
+            if (m) return m[1];
+            try { return JSON.parse(fs.readFileSync('versioning.json','utf8')).VERSION || null; } catch {}
+            try { return JSON.parse(fs.readFileSync('package.json','utf8')).version || null; } catch {}
+            return null;
+          })();
+
           // Matches: {#close <card_id> <list_name>}, {#close <card_id>}, {#close <list_name>}, or {#close}
           const CLOSE_ANY_RE = /\{#close(?:\s+([^}]+))?\}/gi;
           // Matches: {#attach <card_id>}
@@ -231,22 +239,29 @@ jobs:
             const [members, lists] = await Promise.all([getBoardMembers(), getBoardLists()]);
             const resolveMember = buildResolver(members);
 
+            function resolveTarget(name) {
+              const effective = name || inferredVersion;
+              if (effective) {
+                const id = resolveListIdByName(lists, effective);
+                return id ? { id, name: effective } : null;
+              }
+              return findDefaultList(lists);
+            }
+
             // Handle existing cards; move only when {#close} requested
             for (const [idShort, bucket] of byId.entries()) {
               try {
                 const card = await findCardByShortId(idShort);
 
                 const target = (bucket.targetListName !== undefined)
-                  ? (bucket.targetListName
-                      ? (() => { const id = resolveListIdByName(lists, bucket.targetListName); return id ? { id, name: bucket.targetListName } : null; })()
-                      : findDefaultList(lists))
+                  ? resolveTarget(bucket.targetListName)
                   : null;
 
                 if (target) {
                   try { await moveCard(card.id, target.id); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${target.name}`); }
                   catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
                 } else if (bucket.targetListName !== undefined) {
-                  console.error(`No matching list for "${bucket.targetListName || '{complete}'}"`);
+                  console.error(`No matching list for "${bucket.targetListName || inferredVersion || '{complete}'}"`);
                 }
 
                 // Attach commits (dedupe per push)
@@ -275,10 +290,8 @@ jobs:
 
             // Create new cards for {#close <list_name>} or default list
             for (const item of toCreate) {
-              const target = item.listName
-                ? (() => { const id = resolveListIdByName(lists, item.listName); return id ? { id, name: item.listName } : null; })()
-                : findDefaultList(lists);
-              if (!target) { console.error(`No matching list for "${item.listName || '{complete}'}"`); continue; }
+              const target = resolveTarget(item.listName);
+              if (!target) { console.error(`No matching list for "${item.listName || inferredVersion || '{complete}'}"`); continue; }
               const authorId = resolveMember(item.author);
               const name = item.cardTitle;
               const desc = `Created via {#close ${item.listName || target.name}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;
