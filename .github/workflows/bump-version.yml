@@ -5,9 +5,9 @@ on:
     inputs:
       release:
         required: true
-        description: "Expects: \"major\", \"minor\", \"patch\", or a version of the form X.Y.Z"
+        description: "Expects: \"auto\", \"major\", \"minor\", \"patch\", or a version of the form X.Y.Z. \"auto\" picks patch on release-N.N.x, minor on release-N.x.y, otherwise major."
         type: string
-        default: "minor"
+        default: "auto"
 
 jobs:
   bump:
@@ -34,16 +34,31 @@ jobs:
           node <<'NODE'
           const fs = require('fs');
 
-          const releaseInputRaw = process.env.RELEASE_INPUT || 'minor';
+          const releaseInputRaw = process.env.RELEASE_INPUT || 'auto';
           const releaseInput = releaseInputRaw.trim();
           const semverPattern = /^\d+\.\d+\.\d+$/;
           const allowedTypes = new Set(['major', 'minor', 'patch']);
           const normalizedInput = releaseInput.toLowerCase();
-          const releaseType = allowedTypes.has(normalizedInput) ? normalizedInput : null;
+
+          const resolveAuto = () => {
+            const branch = (process.env.GITHUB_REF || '').replace(/^refs\/heads\//, '');
+            const m = branch.match(/^release-(\d+|[xy])\.(\d+|[xy])\.(\d+|[xy])$/i);
+            if (!m) return 'major';
+            const isWild = s => /^[xy]$/i.test(s);
+            if (!isWild(m[1]) && !isWild(m[2]) && isWild(m[3])) return 'patch';
+            if (!isWild(m[1]) && isWild(m[2])) return 'minor';
+            return 'major';
+          };
+
+          const effective = normalizedInput === 'auto' ? resolveAuto() : normalizedInput;
+          if (normalizedInput === 'auto') {
+            console.log(`auto-detected release type "${effective}" from ${process.env.GITHUB_REF || '(no ref)'}`);
+          }
+          const releaseType = allowedTypes.has(effective) ? effective : null;
           const specified = releaseType ? null : releaseInput;
 
           if (!releaseType && (!specified || !semverPattern.test(specified))) {
-            throw new Error('Invalid release input. Expected "major", "minor", "patch", or a version of the form X.Y.Z.');
+            throw new Error('Invalid release input. Expected "auto", "major", "minor", "patch", or a version of the form X.Y.Z.');
           }
           const pkgPath = 'package.json';
           const verPath = 'versioning.json';
