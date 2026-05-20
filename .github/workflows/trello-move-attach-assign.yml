@@ -62,6 +62,15 @@ jobs:
             return null;
           })();
 
+          const inferredBranchLeaf = (() => {
+            const m = (event.ref || '').match(/^refs\/heads\/(.+)$/);
+            if (!m) return null;
+            const branch = m[1];
+            const slash = branch.lastIndexOf('/');
+            const leaf = slash >= 0 ? branch.slice(slash + 1) : branch;
+            return leaf || null;
+          })();
+
           // Matches: {#close <card_id> <list_name>}, {#close <card_id>}, {#close <list_name>}, or {#close}
           const CLOSE_ANY_RE = /\{#close(?:\s+([^}]+))?\}/gi;
           // Matches: {#attach <card_id>}
@@ -211,8 +220,24 @@ jobs:
             return (bestScore > 0) ? best.id : null;
           }
 
+          function resolveListIdByNameExact(lists, name){
+            if (!name) return null;
+            const t = normalize(name);
+            const hit = lists.find(L => normalize(L.name) === t);
+            return hit ? hit.id : null;
+          }
+
           function findDefaultList(lists){
             return lists.find(L => L.name.toLowerCase().includes('{complete}')) || null;
+          }
+
+          function describeChain(explicit){
+            return [
+              explicit && `"${explicit}"`,
+              inferredBranchLeaf && `branch:"${inferredBranchLeaf}"`,
+              inferredVersion && `version:"${inferredVersion}"`,
+              '{complete}',
+            ].filter(Boolean).join(' → ');
           }
 
           function buildResolver(boardMembers){
@@ -245,12 +270,22 @@ jobs:
             const resolveMember = buildResolver(members);
 
             function resolveTarget(name) {
-              const effective = name || inferredVersion;
-              if (effective) {
-                const id = resolveListIdByName(lists, effective);
-                return id ? { id, name: effective } : null;
-              }
-              return findDefaultList(lists);
+              const tryFuzzy = (n) => {
+                if (!n) return null;
+                const id = resolveListIdByName(lists, n);
+                return id ? lists.find(L => L.id === id) : null;
+              };
+              const tryExact = (n) => {
+                if (!n) return null;
+                const id = resolveListIdByNameExact(lists, n);
+                return id ? lists.find(L => L.id === id) : null;
+              };
+              const L =
+                tryFuzzy(name) ||
+                tryExact(inferredBranchLeaf) ||
+                tryFuzzy(inferredVersion) ||
+                findDefaultList(lists);
+              return L ? { id: L.id, name: L.name } : null;
             }
 
             // Handle existing cards; move only when {#close} requested
@@ -266,7 +301,7 @@ jobs:
                   try { await moveCard(card.id, target.id); console.log(`Moved "${card.name}" (#${card.idShort}) -> ${target.name}`); }
                   catch (e) { console.error(`Move failed (#${idShort}): ${e.message}`); }
                 } else if (bucket.targetListName !== undefined) {
-                  console.error(`No matching list for "${bucket.targetListName || inferredVersion || '{complete}'}"`);
+                  console.error(`No matching list for #${idShort} (tried: ${describeChain(bucket.targetListName)})`);
                 }
 
                 // Attach commits (dedupe per push)
@@ -296,7 +331,7 @@ jobs:
             // Create new cards for {#close <list_name>} or default list
             for (const item of toCreate) {
               const target = resolveTarget(item.listName);
-              if (!target) { console.error(`No matching list for "${item.listName || inferredVersion || '{complete}'}"`); continue; }
+              if (!target) { console.error(`No matching list for create (tried: ${describeChain(item.listName)})`); continue; }
               const authorId = resolveMember(item.author);
               const name = item.cardTitle;
               const desc = `Created via {#close ${item.listName || target.name}} on push.\n\nCommit: ${item.url}\n\nFull message:\n${item.message}`;

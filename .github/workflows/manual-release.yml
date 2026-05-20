@@ -75,6 +75,7 @@ jobs:
           TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
           TRELLO_BOARD_ID: ${{ secrets.TRELLO_BOARD_ID }}
           VERSION: ${{ steps.release.outputs.name }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           node <<'NODE'
           const fs = require('fs');
@@ -118,7 +119,20 @@ jobs:
             const completeListPrefix = `Complete (${VERSION})`;
             const completeLists = lists.filter(list => list && !list.closed && typeof list.name === 'string' && list.name.startsWith(completeListPrefix));
             const openLists = lists.filter(list => list && !list.closed);
-            const targetList = completeLists[0] || openLists[0];
+
+            const normalize = s => (s || '').toLowerCase().trim().replace(/\s+/g, ' ');
+            const branchLeaf = (() => {
+              const m = (process.env.GITHUB_REF || '').match(/^refs\/heads\/(.+)$/);
+              if (!m) return null;
+              const branch = m[1];
+              const slash = branch.lastIndexOf('/');
+              const leaf = slash >= 0 ? branch.slice(slash + 1) : branch;
+              return leaf || null;
+            })();
+            const branchLane = branchLeaf
+              ? openLists.find(L => typeof L.name === 'string' && normalize(L.name) === normalize(branchLeaf))
+              : null;
+            const targetList = branchLane || completeLists[0] || openLists[0];
 
             if (!targetList) {
               throw new Error(`Unable to locate an open list on board ${TRELLO_BOARD_ID} to create card "${cardName}".`);
