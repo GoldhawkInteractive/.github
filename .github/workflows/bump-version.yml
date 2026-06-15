@@ -110,6 +110,22 @@ jobs:
             fs.writeFileSync(settingsPath, updated, 'utf8');
           }
 
+          // Core content-pack manifest: mirror VERSION into the pack's asset.Version so
+          // dependents (DLCs, mods) can express "needs game >= X" via the standard dependency
+          // range. Path is X2-assets-relative; the conditional makes this a no-op in repos
+          // that don't host the manifest (same pattern as versioning.json / package.json above).
+          // Surgical regex preserves the file's existing indentation/line endings — top-level
+          // lowercase "version" is left untouched (it's the manifest format version, not the
+          // pack version).
+          const packManifestPath = 'xenonauts/manifest.json';
+          if (fs.existsSync(packManifestPath)) {
+            const text = fs.readFileSync(packManifestPath, 'utf8');
+            const updated = text.replace(/("Version"\s*:\s*)"[^"]*"/, `$1"${newVersion}"`);
+            if (updated !== text) {
+              fs.writeFileSync(packManifestPath, updated, 'utf8');
+            }
+          }
+
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${newVersion}\n`);
           NODE
       - name: Random jitter to reduce Trello race conditions
