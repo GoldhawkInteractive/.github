@@ -216,6 +216,7 @@ jobs:
           const KNOWN = {
             'versioning.json': { type: 'json', key: 'VERSION' },
             'package.json': { type: 'json', key: 'version' },
+            'xenonauts/manifest.json': { type: 'json', path: ['asset', 'Version'] },
             'ProjectSettings/ProjectSettings.asset': { type: 'unity' },
           };
 
@@ -236,9 +237,10 @@ jobs:
 
           const extractVersion = (content, info) => {
             if (info.type === 'json') {
-              const value = JSON.parse(content)[info.key];
+              const keyPath = info.path || [info.key];
+              const value = keyPath.reduce((acc, k) => (acc == null ? undefined : acc[k]), JSON.parse(content));
               if (typeof value !== 'string') {
-                throw new Error(`${info.key} missing or not a string`);
+                throw new Error(`${keyPath.join('.')} missing or not a string`);
               }
               return value.trim();
             }
