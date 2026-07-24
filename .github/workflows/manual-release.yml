@@ -238,7 +238,7 @@ jobs:
           const extractVersion = (content, info) => {
             if (info.type === 'json') {
               const keyPath = info.path || [info.key];
-              const value = keyPath.reduce((acc, k) => (acc == null ? undefined : acc[k]), JSON.parse(content));
+              const value = keyPath.reduce((acc, k) => (acc == null ? undefined : acc[k]), JSON.parse(content.replace(/^\uFEFF/, '')));
               if (typeof value !== 'string') {
                 throw new Error(`${keyPath.join('.')} missing or not a string`);
               }
